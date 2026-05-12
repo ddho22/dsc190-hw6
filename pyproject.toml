@@ -1,0 +1,37 @@
+[project]
+name = "nldate"
+version = "0.1.0"
+description = "Natural language date parsing — no LLMs required."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/YOUR_USERNAME/nldate"
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.10",
+    "pytest>=8.2",
+    "ruff>=0.4",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "PL", "RUF"]
+ignore = ["PLR0911", "PLR0912", "PLR0915"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src/nldate"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
