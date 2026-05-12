@@ -18,7 +18,6 @@ WEEKDAY_NAMES: dict[str, int] = {
     "friday": 4,
     "saturday": 5,
     "sunday": 6,
-    # abbreviations
     "mon": 0,
     "tue": 1,
     "tues": 1,
@@ -44,7 +43,6 @@ MONTH_NAMES: dict[str, int] = {
     "october": 10,
     "november": 11,
     "december": 12,
-    # abbreviations
     "jan": 1,
     "feb": 2,
     "mar": 3,
@@ -91,7 +89,7 @@ WORD_NUMBERS: dict[str, int] = {
     "eighty": 80,
     "ninety": 90,
     "hundred": 100,
-    "half": 0,  # "half a year" — handled specially
+    "half": 0,
 }
 
 # ---------------------------------------------------------------------------
@@ -100,17 +98,14 @@ WORD_NUMBERS: dict[str, int] = {
 
 
 def _normalize(s: str) -> str:
-    """Lowercase, collapse whitespace, strip punctuation noise."""
+    """Lowercase, collapse whitespace, strip ordinal suffixes."""
     s = s.lower().strip()
-    # Remove ordinal suffixes: 1st→1, 2nd→2, 3rd→3, 4th→4 …
     s = re.sub(r"\b(\d+)(?:st|nd|rd|th)\b", r"\1", s)
-    # Collapse multiple spaces
     s = re.sub(r"\s+", " ", s)
     return s
 
 
 def _parse_number(token: str) -> int | None:
-    """Convert a string token to an integer (digit string or English word)."""
     if re.fullmatch(r"\d+", token):
         return int(token)
     return WORD_NUMBERS.get(token)
@@ -120,18 +115,11 @@ def _parse_quantity(tokens: list[str], pos: int) -> tuple[int, int]:
     """
     Parse a possibly compound English number starting at *pos*.
     Returns (value, new_pos).
-
-    Handles:
-      "3"          → 3
-      "three"      → 3
-      "twenty two" → 22   (two consecutive word numbers that sum)
-      "2"          → 2
     """
     v = _parse_number(tokens[pos])
     if v is None:
         return 0, pos
     pos += 1
-    # Try to combine tens + units, e.g. "twenty" + "two"
     if pos < len(tokens):
         v2 = _parse_number(tokens[pos])
         tens_range = range(_TENS_MIN, _TENS_MAX, _TENS_STEP)
@@ -179,11 +167,17 @@ def _last_weekday(ref: date, weekday: int) -> date:
 
 
 def _this_weekday(ref: date, weekday: int) -> date:
-    """
-    'This Tuesday' — the coming Tuesday within the current week (Mon-Sun),
-    or next week if today is already past that day.
-    """
+    """'This Tuesday' — the coming Tuesday within the current week or next."""
     return _next_weekday(ref, weekday)
+
+
+def _end_of_month(d: date) -> date:
+    last_day = calendar.monthrange(d.year, d.month)[1]
+    return date(d.year, d.month, last_day)
+
+
+def _start_of_month(d: date) -> date:
+    return date(d.year, d.month, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -221,11 +215,9 @@ def parse(s: str, today: date | None = None) -> date:
     s = _normalize(s)
 
     # ------------------------------------------------------------------
-    # 1. Absolute anchors with optional offset
+    # 1. Simple named anchors
     # ------------------------------------------------------------------
-
-    # "today", "tomorrow", "yesterday"
-    if s == "today":
+    if s in ("today", "now"):
         return today
     if s == "tomorrow":
         return today + timedelta(days=1)
@@ -233,27 +225,37 @@ def parse(s: str, today: date | None = None) -> date:
         return today - timedelta(days=1)
 
     # ------------------------------------------------------------------
-    # 2.  "next/last/this <weekday>"
+    # 2. "the day after tomorrow" / "the day before yesterday"
     # ------------------------------------------------------------------
-    m = re.fullmatch(
-        r"(next|last|this)\s+(" + "|".join(WEEKDAY_NAMES) + r")", s
-    )
+    if s == "the day after tomorrow":
+        return today + timedelta(days=2)
+    if s == "the day before yesterday":
+        return today - timedelta(days=2)
+
+    # ------------------------------------------------------------------
+    # 3. "next/last/this <weekday>" and bare weekday name
+    # ------------------------------------------------------------------
+    _wd_pat = "|".join(WEEKDAY_NAMES)
+    m = re.fullmatch(r"(next|last|this|coming|this coming)\s+(" + _wd_pat + r")", s)
     if m:
         direction, day_name = m.group(1), m.group(2)
         wd = WEEKDAY_NAMES[day_name]
-        if direction == "next":
-            return _next_weekday(today, wd)
-        elif direction == "last":
+        if direction == "last":
             return _last_weekday(today, wd)
-        else:  # this
-            return _this_weekday(today, wd)
+        else:  # next / this / coming / this coming → upcoming
+            return _next_weekday(today, wd)
+
+    # "coming <weekday>" or "on <weekday>" or "by <weekday>"
+    m = re.fullmatch(r"(?:coming|on|by)\s+(" + _wd_pat + r")", s)
+    if m:
+        return _next_weekday(today, WEEKDAY_NAMES[m.group(1)])
 
     # bare weekday name → same as "next <weekday>"
     if s in WEEKDAY_NAMES:
         return _next_weekday(today, WEEKDAY_NAMES[s])
 
     # ------------------------------------------------------------------
-    # 3.  "next/last week/month/year"
+    # 4. "next/last week/month/year"
     # ------------------------------------------------------------------
     m = re.fullmatch(r"(next|last)\s+(week|month|year)", s)
     if m:
@@ -267,11 +269,53 @@ def parse(s: str, today: date | None = None) -> date:
             return _add_years(today, sign)
 
     # ------------------------------------------------------------------
-    # 4.  "<N> <unit>(s) ago / from now / ago/hence"
+    # 5. "start/beginning/end of (next/last/this) month/year"
     # ------------------------------------------------------------------
     m = re.fullmatch(
-        r"(.+?)\s+(ago|from now|hence|later|from today)", s
+        r"(start|beginning|end)\s+of\s+(?:(next|last|this)\s+)?(month|year)", s
     )
+    if m:
+        boundary, direction, unit = m.group(1), m.group(2), m.group(3)
+        direction = direction or "this"
+        if unit == "month":
+            if direction == "next":
+                ref = _add_months(today, 1)
+            elif direction == "last":
+                ref = _add_months(today, -1)
+            else:
+                ref = today
+            if boundary == "end":
+                return _end_of_month(ref)
+            else:
+                return _start_of_month(ref)
+        else:  # year
+            if direction == "next":
+                yr = today.year + 1
+            elif direction == "last":
+                yr = today.year - 1
+            else:
+                yr = today.year
+            if boundary == "end":
+                return date(yr, 12, 31)
+            else:
+                return date(yr, 1, 1)
+
+    # ------------------------------------------------------------------
+    # 6. "end/start of month" (shorthand without "this")
+    # ------------------------------------------------------------------
+    if s == "end of month":
+        return _end_of_month(today)
+    if s in ("start of month", "beginning of month"):
+        return _start_of_month(today)
+    if s == "end of year":
+        return date(today.year, 12, 31)
+    if s in ("start of year", "beginning of year"):
+        return date(today.year, 1, 1)
+
+    # ------------------------------------------------------------------
+    # 7. "<N> <unit>(s) ago / from now / hence / later / from today"
+    # ------------------------------------------------------------------
+    m = re.fullmatch(r"(.+?)\s+(ago|from now|hence|later|from today)", s)
     if m:
         offset_str, direction = m.group(1), m.group(2)
         sign = -1 if direction == "ago" else 1
@@ -280,7 +324,7 @@ def parse(s: str, today: date | None = None) -> date:
             return _apply_delta(today, delta, sign)
 
     # ------------------------------------------------------------------
-    # 5.  "in <N> <unit>(s)"  →  future
+    # 8. "in <N> <unit>(s)"  →  future
     # ------------------------------------------------------------------
     m = re.fullmatch(r"in\s+(.+)", s)
     if m:
@@ -289,12 +333,9 @@ def parse(s: str, today: date | None = None) -> date:
             return _apply_delta(today, delta, 1)
 
     # ------------------------------------------------------------------
-    # 6.  "<N> <unit>(s) before/after <anchor>"
+    # 9. "<N> <unit>(s) before/after <anchor>"
     # ------------------------------------------------------------------
-    # We need to split on "before" or "after" that is *not* part of a month
-    # name or other word.
     for pivot in ("before", "after", "prior to", "following", "from"):
-        # build a regex that finds the pivot as a whole word
         pat = r"^(.+?)\s+\b" + re.escape(pivot) + r"\b\s+(.+)$"
         m = re.fullmatch(pat, s)
         if m:
@@ -307,7 +348,21 @@ def parse(s: str, today: date | None = None) -> date:
                 return _apply_delta(anchor, delta, sign)
 
     # ------------------------------------------------------------------
-    # 7.  Absolute date (various formats)
+    # 10. "the Nth of <Month> [YYYY]" / "the <Month> Nth [YYYY]"
+    # ------------------------------------------------------------------
+    _mon_pat = "(" + "|".join(MONTH_NAMES) + ")"
+    m = re.fullmatch(r"the\s+(\d{1,2})\s+of\s+" + _mon_pat + r"(?:,?\s+(\d{4}))?", s)
+    if m:
+        day = int(m.group(1))
+        mon = MONTH_NAMES[m.group(2)]
+        year = int(m.group(3)) if m.group(3) else today.year
+        try:
+            return date(year, mon, day)
+        except ValueError:
+            pass
+
+    # ------------------------------------------------------------------
+    # 11. Absolute date (various formats)
     # ------------------------------------------------------------------
     anchor = _parse_anchor(s, today)
     if anchor is not None:
@@ -317,19 +372,16 @@ def parse(s: str, today: date | None = None) -> date:
 
 
 # ---------------------------------------------------------------------------
-# Offset parsing  ("3 days", "1 year and 2 months", "a week", …)
+# Offset parsing  ("3 days", "1 year and 2 months", "a week", "a fortnight"…)
 # ---------------------------------------------------------------------------
 
-
-# Offsets are stored as (days, months, years) tuples so we can apply
-# calendar-aware arithmetic for months/years.
 _Offset = tuple[int, int, int]  # (days, months, years)
 
 
 def _parse_offset(s: str) -> _Offset | None:
     """
     Parse an offset like ``"3 days"``, ``"1 year and 2 months"``,
-    ``"a week"``, ``"2 weeks and 3 days"``.
+    ``"a week"``, ``"2 weeks and 3 days"``, ``"a fortnight"``.
 
     Returns (days, months, years) or None if unrecognized.
     """
@@ -337,6 +389,10 @@ def _parse_offset(s: str) -> _Offset | None:
     # Remove filler words
     s = re.sub(r"\b(and|,)\b", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
+
+    # Handle "a fortnight" / "fortnight"
+    if s in ("a fortnight", "fortnight", "1 fortnight", "one fortnight"):
+        return (14, 0, 0)
 
     days = 0
     months = 0
@@ -347,14 +403,11 @@ def _parse_offset(s: str) -> _Offset | None:
     matched_any = False
 
     while i < len(tokens):
-        # Try to read a number
         qty, new_i = _parse_quantity(tokens, i)
         if new_i == i:
-            # no number found — unrecognized token, bail
             return None
         i = new_i
 
-        # Now expect a unit
         if i >= len(tokens):
             return None
         unit = tokens[i].rstrip("s")  # strip plural 's'
@@ -364,6 +417,8 @@ def _parse_offset(s: str) -> _Offset | None:
             days += qty
         elif unit in ("week",):
             days += qty * 7
+        elif unit in ("fortnight",):
+            days += qty * 14
         elif unit in ("month",):
             months += qty
         elif unit in ("year",):
@@ -397,13 +452,12 @@ _YEAR_PAT = r"(\d{4})"
 
 def _parse_anchor(s: str, today: date) -> date | None:
     """
-    Try to parse *s* as an absolute date or a named anchor like
-    ``"today"``, ``"tomorrow"``, ``"yesterday"``.
+    Try to parse *s* as an absolute date or a named anchor.
     """
     s = s.strip()
 
     # Named anchors
-    if s == "today":
+    if s in ("today", "now"):
         return today
     if s == "tomorrow":
         return today + timedelta(days=1)
@@ -413,7 +467,42 @@ def _parse_anchor(s: str, today: date) -> date | None:
     # ISO: 2025-12-01
     m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", s)
     if m:
-        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        try:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+
+    # YYYY/MM/DD: 2025/12/04
+    m = re.fullmatch(r"(\d{4})/(\d{1,2})/(\d{1,2})", s)
+    if m:
+        try:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+
+    # YYYY.MM.DD: 2025.12.04
+    m = re.fullmatch(r"(\d{4})\.(\d{1,2})\.(\d{1,2})", s)
+    if m:
+        try:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+
+    # DD.MM.YYYY: 04.12.2025
+    m = re.fullmatch(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", s)
+    if m:
+        try:
+            return date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        except ValueError:
+            return None
+
+    # DD-MM-YYYY: 04-12-2025 (European format, only when year is 4 digits last)
+    m = re.fullmatch(r"(\d{1,2})-(\d{1,2})-(\d{4})", s)
+    if m:
+        try:
+            return date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        except ValueError:
+            return None
 
     # MM/DD/YYYY or MM/DD/YY
     m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{2,4})", s)
@@ -421,7 +510,10 @@ def _parse_anchor(s: str, today: date) -> date | None:
         mo, dy, yr = int(m.group(1)), int(m.group(2)), int(m.group(3))
         if yr < _TWO_DIGIT_YEAR_MAX:
             yr += _TWO_DIGIT_YEAR_BASE
-        return date(yr, mo, dy)
+        try:
+            return date(yr, mo, dy)
+        except ValueError:
+            return None
 
     # "Month DD, YYYY"  or  "Month DD YYYY"  or  "Month YYYY" (no day→1st)
     m = re.fullmatch(
