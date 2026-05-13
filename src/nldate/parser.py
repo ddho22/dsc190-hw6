@@ -103,6 +103,7 @@ def _normalize(s: str) -> str:
     s = re.sub(r"\b(\d+)(?:st|nd|rd|th)\b", r"\1", s)
     s = re.sub(r"\s+", " ", s)
     s = re.sub(r"([a-z])\.(\s|$)", r"\1\2", s)
+    s = s.rstrip(".")
     return s
 
 
