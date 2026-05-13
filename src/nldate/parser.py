@@ -388,8 +388,9 @@ def _parse_offset(s: str) -> _Offset | None:
     Returns (days, months, years) or None if unrecognized.
     """
     s = s.strip()
-    # Remove filler words
-    s = re.sub(r"\b(and|,)\b", " ", s)
+    # Remove filler words and commas
+    s = re.sub(r"\band\b", " ", s)
+    s = re.sub(r",", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
 
     # Handle "a fortnight" / "fortnight"
